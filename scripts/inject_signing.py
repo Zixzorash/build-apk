@@ -2,7 +2,6 @@
 import argparse
 import os
 import re
-import glob
 from pathlib import Path
 
 def find_app_build_files(project_root: str, project_type: str):
@@ -13,11 +12,10 @@ def find_app_build_files(project_root: str, project_type: str):
         candidates += list(root.glob("android/app/build.gradle*"))
     elif project_type == "react-native":
         candidates += list(root.glob("android/app/build.gradle*"))
-    else:  # native
+    else:
         candidates += list(root.glob("app/build.gradle*"))
         candidates += list(root.glob("**/app/build.gradle*"))
 
-    # ลบ duplicate และเรียง
     seen = set()
     result = []
     for c in candidates:
@@ -27,7 +25,6 @@ def find_app_build_files(project_root: str, project_type: str):
     return result
 
 def inject_groovy(content: str, keystore: str, store_pass: str, alias: str, key_pass: str) -> str:
-    # เพิ่ม signingConfigs
     signing_block = f'''
     signingConfigs {{
         release {{
@@ -38,10 +35,7 @@ def inject_groovy(content: str, keystore: str, store_pass: str, alias: str, key_
         }}
     }}
 '''
-
-    # หา android { ... }
     if "signingConfigs" in content:
-        # แทนที่ของเดิม
         content = re.sub(
             r'signingConfigs\s*\{[^}]*release\s*\{[^}]*\}[^}]*\}',
             signing_block.strip(),
@@ -49,7 +43,6 @@ def inject_groovy(content: str, keystore: str, store_pass: str, alias: str, key_
             flags=re.DOTALL
         )
     else:
-        # แทรกหลัง android {
         content = re.sub(
             r'(android\s*\{)',
             r'\1\n' + signing_block,
@@ -57,22 +50,19 @@ def inject_groovy(content: str, keystore: str, store_pass: str, alias: str, key_
             count=1
         )
 
-    # บังคับใช้ signingConfig ใน buildTypes.release
-    if "buildTypes" in content:
-        content = re.sub(
-            r'(release\s*\{[^}]*)(minifyEnabled|proguardFiles|debuggable)',
-            r'\1signingConfig signingConfigs.release\n            \2',
-            content,
-            count=1,
-            flags=re.DOTALL
-        )
-        # กรณีไม่มีอะไรเลยใน release
-        content = re.sub(
-            r'(release\s*\{\s*)(\})',
-            r'\1signingConfig signingConfigs.release\n        \2',
-            content,
-            count=1
-        )
+    content = re.sub(
+        r'(release\s*\{[^}]*)(minifyEnabled|proguardFiles|debuggable)',
+        r'\1signingConfig signingConfigs.release\n            \2',
+        content,
+        count=1,
+        flags=re.DOTALL
+    )
+    content = re.sub(
+        r'(release\s*\{\s*)(\})',
+        r'\1signingConfig signingConfigs.release\n        \2',
+        content,
+        count=1
+    )
     return content
 
 def inject_kts(content: str, keystore: str, store_pass: str, alias: str, key_pass: str) -> str:
@@ -101,7 +91,6 @@ def inject_kts(content: str, keystore: str, store_pass: str, alias: str, key_pas
             count=1
         )
 
-    # buildTypes
     content = re.sub(
         r'(getByName\("release"\)\s*\{[^}]*)(isMinifyEnabled|proguardFiles)',
         r'\1signingConfig = signingConfigs.getByName("release")\n            \2',
@@ -144,7 +133,6 @@ def main():
         else:
             new_content = inject_groovy(content, abs_keystore, args.store_password, args.key_alias, args.key_password)
 
-        # Optional: override applicationId
         if args.package_override:
             new_content = re.sub(
                 r'applicationId\s+["\'][^"\']+["\']',
