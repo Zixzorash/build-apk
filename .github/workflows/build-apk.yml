@@ -38,7 +38,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest          # หรือเปลี่ยนเป็น ubuntu-24.04 ถ้าอยากล็อกเวอร์ชัน
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
@@ -65,14 +65,14 @@ jobs:
           link-to-sdk: true
 
       - name: Cache Gradle
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             \~/.gradle/caches
             \~/.gradle/wrapper
-          key: gradle-\( {{ runner.os }}- \){{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: \( {{ runner.os }}-gradle- \){{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            ${{ runner.os }}-gradle-
 
       # ---------- เตรียมโปรเจกต์ ----------
       - name: Prepare project source
@@ -94,7 +94,7 @@ jobs:
             unzip -q project.zip -d workspace
           fi
 
-          # หา root ของโปรเจกต์
+          # หา root ของโปรเจกต์ (กรณี ZIP มีโฟลเดอร์ซ้อน)
           if [ -f workspace/settings.gradle ] || [ -f workspace/settings.gradle.kts ] || \
              [ -f workspace/pubspec.yaml ] || [ -f workspace/package.json ]; then
             echo "PROJECT_ROOT=workspace" >> $GITHUB_ENV
