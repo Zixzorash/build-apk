@@ -17,8 +17,8 @@ on:
         default: "zip_in_repo"
         type: choice
         options:
-          - zip_in_repo          # ใช้ไฟล์ project.zip ที่อยู่ใน repo
-          - zip_url              # ดาวน์โหลดจาก URL
+          - zip_in_repo
+          - zip_url
       zip_url:
         description: "ZIP URL (ใช้เมื่อเลือก zip_url)"
         required: false
@@ -38,7 +38,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest          # หรือเปลี่ยนเป็น ubuntu-24.04 ถ้าอยากล็อกเวอร์ชัน
     timeout-minutes: 60
     permissions:
       contents: read
@@ -46,16 +46,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Setup NDK
         uses: nttld/setup-ndk@v1
@@ -94,12 +94,13 @@ jobs:
             unzip -q project.zip -d workspace
           fi
 
-          # หา root ของโปรเจกต์ (กรณี ZIP มีโฟลเดอร์ซ้อน)
-          if [ -f workspace/settings.gradle ] || [ -f workspace/settings.gradle.kts ] || [ -f workspace/pubspec.yaml ] || [ -f workspace/package.json ]; then
+          # หา root ของโปรเจกต์
+          if [ -f workspace/settings.gradle ] || [ -f workspace/settings.gradle.kts ] || \
+             [ -f workspace/pubspec.yaml ] || [ -f workspace/package.json ]; then
             echo "PROJECT_ROOT=workspace" >> $GITHUB_ENV
           else
-            # หาโฟลเดอร์ลูกที่มีไฟล์สำคัญ
-            ROOT=$(find workspace -maxdepth 2 \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "pubspec.yaml" -o -name "package.json" \) | head -1 | xargs dirname)
+            ROOT=$(find workspace -maxdepth 3 \( -name "settings.gradle" -o -name "settings.gradle.kts" \
+                   -o -name "pubspec.yaml" -o -name "package.json" \) | head -1 | xargs dirname)
             echo "PROJECT_ROOT=$ROOT" >> $GITHUB_ENV
           fi
           echo "Project root → $PROJECT_ROOT"
@@ -123,9 +124,9 @@ jobs:
 
       - name: Setup Node (React Native)
         if: env.PROJECT_TYPE == 'react-native'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: ${{ env.PROJECT_ROOT }}/package-lock.json
 
@@ -134,8 +135,6 @@ jobs:
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
           npm ci || npm install
-          # บางโปรเจกต์ใช้ yarn
-          # yarn install --frozen-lockfile
 
       # ---------- Generate Keystore ----------
       - name: Generate Keystore (AI Studio style)
@@ -223,4 +222,3 @@ jobs:
           echo "Cleaning up..."
           rm -rf workspace project.zip release.keystore || true
           rm -rf \~/.gradle/caches || true
-          docker system prune -f || true
