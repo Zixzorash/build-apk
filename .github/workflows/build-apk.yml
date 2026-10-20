@@ -1,0 +1,226 @@
+name: Build APK / AAB (Native + Flutter + RN + NDK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+      source:
+        description: "Source of project"
+        required: true
+        default: "zip_in_repo"
+        type: choice
+        options:
+          - zip_in_repo          # ใช้ไฟล์ project.zip ที่อยู่ใน repo
+          - zip_url              # ดาวน์โหลดจาก URL
+      zip_url:
+        description: "ZIP URL (ใช้เมื่อเลือก zip_url)"
+        required: false
+        default: ""
+      package_name_override:
+        description: "Override package name (optional)"
+        required: false
+        default: ""
+      flutter_version:
+        description: "Flutter version (ถ้าเป็น Flutter)"
+        required: false
+        default: "3.24.0"
+      ndk_version:
+        description: "NDK version"
+        required: false
+        default: "r27c"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ github.event.inputs.ndk_version }}
+          link-to-sdk: true
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            \~/.gradle/caches
+            \~/.gradle/wrapper
+          key: gradle-\( {{ runner.os }}- \){{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ---------- เตรียมโปรเจกต์ ----------
+      - name: Prepare project source
+        id: prepare
+        run: |
+          mkdir -p workspace
+          if [ "${{ github.event.inputs.source }}" = "zip_in_repo" ]; then
+            if [ ! -f project.zip ]; then
+              echo "❌ ไม่พบ project.zip ใน repo"
+              exit 1
+            fi
+            unzip -q project.zip -d workspace
+          else
+            if [ -z "${{ github.event.inputs.zip_url }}" ]; then
+              echo "❌ ต้องใส่ zip_url"
+              exit 1
+            fi
+            curl -L -o project.zip "${{ github.event.inputs.zip_url }}"
+            unzip -q project.zip -d workspace
+          fi
+
+          # หา root ของโปรเจกต์ (กรณี ZIP มีโฟลเดอร์ซ้อน)
+          if [ -f workspace/settings.gradle ] || [ -f workspace/settings.gradle.kts ] || [ -f workspace/pubspec.yaml ] || [ -f workspace/package.json ]; then
+            echo "PROJECT_ROOT=workspace" >> $GITHUB_ENV
+          else
+            # หาโฟลเดอร์ลูกที่มีไฟล์สำคัญ
+            ROOT=$(find workspace -maxdepth 2 \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "pubspec.yaml" -o -name "package.json" \) | head -1 | xargs dirname)
+            echo "PROJECT_ROOT=$ROOT" >> $GITHUB_ENV
+          fi
+          echo "Project root → $PROJECT_ROOT"
+
+      - name: Detect project type
+        id: detect
+        run: |
+          chmod +x scripts/detect_project.sh
+          TYPE=$(scripts/detect_project.sh "$PROJECT_ROOT")
+          echo "PROJECT_TYPE=$TYPE" >> $GITHUB_ENV
+          echo "Detected: $TYPE"
+
+      # ---------- Setup ตามชนิดโปรเจกต์ ----------
+      - name: Setup Flutter
+        if: env.PROJECT_TYPE == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ github.event.inputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: Setup Node (React Native)
+        if: env.PROJECT_TYPE == 'react-native'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ${{ env.PROJECT_ROOT }}/package-lock.json
+
+      - name: Install JS dependencies (RN)
+        if: env.PROJECT_TYPE == 'react-native'
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          npm ci || npm install
+          # บางโปรเจกต์ใช้ yarn
+          # yarn install --frozen-lockfile
+
+      # ---------- Generate Keystore ----------
+      - name: Generate Keystore (AI Studio style)
+        if: github.event.inputs.build_type == 'release'
+        run: |
+          chmod +x scripts/generate_keystore.sh
+          scripts/generate_keystore.sh
+          echo "KEYSTORE_FILE=$(pwd)/release.keystore" >> $GITHUB_ENV
+          echo "STORE_PASSWORD=android" >> $GITHUB_ENV
+          echo "KEY_ALIAS=aistudio" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=android" >> $GITHUB_ENV
+
+      # ---------- Inject Signing ----------
+      - name: Inject signing config
+        if: github.event.inputs.build_type == 'release'
+        run: |
+          python3 scripts/inject_signing.py \
+            --project-root "$PROJECT_ROOT" \
+            --project-type "$PROJECT_TYPE" \
+            --keystore "$KEYSTORE_FILE" \
+            --store-password "$STORE_PASSWORD" \
+            --key-alias "$KEY_ALIAS" \
+            --key-password "$KEY_PASSWORD" \
+            --package-override "${{ github.event.inputs.package_name_override }}"
+
+      # ---------- Build ----------
+      - name: Build Native Android
+        if: env.PROJECT_TYPE == 'native'
+        working-directory: ${{ env.PROJECT_ROOT }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          chmod +x gradlew || true
+          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+            ./gradlew assembleRelease bundleRelease --stacktrace --no-daemon
+          else
+            ./gradlew assembleDebug --stacktrace --no-daemon
+          fi
+
+      - name: Build Flutter
+        if: env.PROJECT_TYPE == 'flutter'
+        working-directory: ${{ env.PROJECT_ROOT }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          flutter pub get
+          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+            flutter build apk --release
+            flutter build appbundle --release
+          else
+            flutter build apk --debug
+          fi
+
+      - name: Build React Native
+        if: env.PROJECT_TYPE == 'react-native'
+        working-directory: ${{ env.PROJECT_ROOT }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd android
+          chmod +x gradlew
+          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+            ./gradlew assembleRelease bundleRelease --stacktrace --no-daemon
+          else
+            ./gradlew assembleDebug --stacktrace --no-daemon
+          fi
+
+      # ---------- Upload Artifacts ----------
+      - name: Upload APK / AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output-${{ github.event.inputs.build_type }}
+          path: |
+            ${{ env.PROJECT_ROOT }}/**/build/outputs/apk/**/*.apk
+            ${{ env.PROJECT_ROOT }}/**/build/outputs/bundle/**/*.aab
+            ${{ env.PROJECT_ROOT }}/build/app/outputs/flutter-apk/*.apk
+            ${{ env.PROJECT_ROOT }}/build/app/outputs/bundle/**/*.aab
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ---------- Cleanup ----------
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          rm -rf workspace project.zip release.keystore || true
+          rm -rf \~/.gradle/caches || true
+          docker system prune -f || true
